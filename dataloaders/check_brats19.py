@@ -1,43 +1,52 @@
-
-
-
 import os
-import glob
+import sys
+import torch
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from brats19 import * # Ensure this points to your updated BraTS class
+# from utils import RandomRotFlip, RandomCrop, ToTensor  # Ensure these are implemented
 
-def check_dataset(root_path):
+def check_dataset(dataset_path):
     """
-    This function checks if the .h5 files exist for each patient in the dataset directory.
-    
-    :param root_path: Root path of the dataset (e.g., '/content/drive/MyDrive/Research/Dataset/data/brats2019')
+    Check the BraTS dataset by loading a sample and printing its shape.
     """
+    # Set up transforms
+    transform = transforms.Compose([
+        RandomRotFlip(),
+        RandomCrop(output_size=(96, 96, 96)),
+        ToTensor(),
+    ])
     
-    # Get the list of all patient directories (assuming they are at the root of `root_path`)
-    patient_dirs = glob.glob(os.path.join(root_path, 'data', '*'))
+    # Initialize dataset
+    print("Initializing dataset...")
+    db_train = BraTS(base_dir=dataset_path, split='train', transform=transform)
     
-    # Initialize a counter for missing files
-    missing_files = 0
+    # Test dataset size
+    print(f"Dataset contains {len(db_train)} samples.")
 
-    for patient_dir in patient_dirs:
-        # Extract the patient name from the directory
-        patient_name = os.path.basename(patient_dir)
+    # Get a sample from the dataset
+    sample = db_train[0]
+    print(f"Sample loaded. Image shape: {sample['image'].shape}, Label shape: {sample['label'].shape}")
 
-        # Get the list of all .h5 files for this patient
-        h5_files = glob.glob(os.path.join(patient_dir, '*.h5'))
+    # Check the data loading mechanism by using a DataLoader
+    batch_size = 8  # Adjust as needed
+    train_loader = DataLoader(db_train, batch_size=batch_size, shuffle=True)
 
-        # Check if there are any .h5 files
-        if not h5_files:
-            print(f"Warning: No .h5 files found for patient {patient_name}. Check the directory: {patient_dir}")
-            missing_files += 1
-        else:
-            print(f"Patient {patient_name} has {len(h5_files)} .h5 files.")
+    print(f"Batch size: {batch_size}")
+    print("Loading first batch...")
 
-    if missing_files == 0:
-        print("All patients have .h5 files.")
-    else:
-        print(f"Total {missing_files} patients are missing .h5 files.")
+    for i, batch in enumerate(train_loader):
+        if i == 0:  # Just check the first batch
+            print(f"Batch {i} loaded. Image batch shape: {batch['image'].shape}, Label batch shape: {batch['label'].shape}")
+            break
+
+    print("Dataset and batch checking complete.")
 
 if __name__ == "__main__":
-    # Specify the root path to your dataset (this should be the same root path you're using in your training script)
-    root_path = r'D:\Dataset\BraTS_2019\BraTS_Flair_seg\BraTS_2019'
+    dataset_path = r"D:\Dataset\BraTS_2019\BraTS_Flair_seg\BraTS_2019"
     
-    check_dataset(root_path)
+    if not os.path.exists(dataset_path):
+        print(f"Error: The dataset path {dataset_path} does not exist.")
+        sys.exit(1)
+    
+    check_dataset(dataset_path)

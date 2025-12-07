@@ -10,8 +10,45 @@ import random
 from torch.utils.data.sampler import Sampler
 from skimage import transform as sk_trans
 from scipy.ndimage import rotate, zoom
+import pdb
 import cv2
 
+# class BraTS(Dataset):
+#     def __init__(self, base_dir=None, split='train', num=None, transform=None):
+#         self._base_dir = base_dir
+#         self.sample_list = []
+#         self.split = split
+#         self.transform = transform
+#         if self.split == 'train':
+#             with open(self._base_dir + '/train.list', 'r') as f1:
+#                 self.sample_list = f1.readlines()
+#             self.sample_list = [item.replace('\n', '') for item in self.sample_list]
+
+#         elif self.split == 'val':
+#             with open(self._base_dir + '/val.list', 'r') as f:
+#                 self.sample_list = f.readlines()
+#             self.sample_list = [item.replace('\n', '') for item in self.sample_list]
+#         if num is not None and self.split == "train":
+#             self.sample_list = self.sample_list[:num]
+#         print("total {} samples".format(len(self.sample_list)))
+
+#     def __len__(self):
+#         return len(self.sample_list)
+
+#     def __getitem__(self, idx):
+#         case = self.sample_list[idx]
+#         if self.split == "train":
+#             h5f = h5py.File(self._base_dir + "/data/{}".format(case), 'r')
+#         else:
+#             h5f = h5py.File(self._base_dir + "/data/{}".format(case), 'r')
+#         image = h5f['image'][:]
+#         label = h5f['label'][:]
+#         sample = {'image': image, 'label': label}
+#         if self.transform:
+#             sample = self.transform(sample)
+#         # sample["idx"] = idx
+#         sample['case'] = case
+#         return sample
 
 class BraTS(Dataset):
     def __init__(self, base_dir=None, split='train', num=None, transform=None):
@@ -41,7 +78,7 @@ class BraTS(Dataset):
 
     def __getitem__(self, idx):
         case = self.sample_list[idx]
-        patient_dir = os.path.join(self._base_dir, 'data', case)
+        patient_dir = os.path.join(self._base_dir, case)
         h5_files = glob(os.path.join(patient_dir, '*.h5'))
 
         if len(h5_files) == 0:
@@ -61,44 +98,45 @@ class BraTS(Dataset):
         return sample
 
 
+
+
 class BaseDataSets(Dataset):
     def __init__(self, base_dir=None, split='train', num=None, transform=None):
         self._base_dir = base_dir
         self.sample_list = []
         self.split = split
         self.transform = transform
-
         if self.split == 'train':
             with open(self._base_dir + '/train_slices.list', 'r') as f1:
                 self.sample_list = f1.readlines()
+            self.sample_list = [item.replace('\n', '') for item in self.sample_list]
+
         elif self.split == 'val':
             with open(self._base_dir + '/val.list', 'r') as f:
                 self.sample_list = f.readlines()
-
-        self.sample_list = [item.strip() for item in self.sample_list]
+            self.sample_list = [item.replace('\n', '') for item in self.sample_list]
         if num is not None and self.split == "train":
             self.sample_list = self.sample_list[:num]
-        
-        print(f"Total {len(self.sample_list)} samples for {self.split} split.")
+        print("total {} samples".format(len(self.sample_list)))
 
     def __len__(self):
         return len(self.sample_list)
 
     def __getitem__(self, idx):
         case = self.sample_list[idx]
-        h5f = h5py.File(self._base_dir + "/data/{}/{}.h5".format(case, case), 'r')
+        if self.split == "train":
+            h5f = h5py.File(self._base_dir + "/{}/{}.h5".format(case), 'r')
+        else:
+            h5f = h5py.File(self._base_dir + "/{}/{}.h5".format(case), 'r')
         image = h5f['image'][:]
         label = h5f['label'][:]
         sample = {'image': image, 'label': label}
-
-        if self.transform:
+        if self.split == "train":
             sample = self.transform(sample)
-
+        # sample["idx"] = idx
         sample['case'] = case
         return sample
 
-
-# Transformation utilities
 def random_rot_flip(image, label):
     k = np.random.randint(0, 4)
     image = np.rot90(image, k)
@@ -122,6 +160,9 @@ class RandomGenerator(object):
 
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
+        # ind = random.randrange(0, img.shape[0])
+        # image = img[ind, ...]
+        # label = lab[ind, ...]
         if random.random() > 0.5:
             image, label = random_rot_flip(image, label)
         elif random.random() > 0.5:
@@ -164,6 +205,7 @@ class LAHeart(Dataset):
     def __getitem__(self, idx):
         image_name = self.image_list[idx]
         h5f = h5py.File(self._base_dir + "/2018LA_Seg_Training Set/" + image_name + "/mri_norm2.h5", 'r')
+        # h5f = h5py.File(self._base_dir+"/"+image_name+"/mri_norm2.h5", 'r')
         image = h5f['image'][:]
         label = h5f['label'][:]
         sample = {'image': image, 'label': label}
@@ -172,8 +214,8 @@ class LAHeart(Dataset):
 
         return sample
 
-
 class Resize(object):
+
     def __init__(self, output_size):
         self.output_size = output_size
 
@@ -183,37 +225,46 @@ class Resize(object):
         label = label.astype(bool)
         image = sk_trans.resize(image, self.output_size, order = 1, mode = 'constant', cval = 0)
         label = sk_trans.resize(label, self.output_size, order = 0)
+        
         return {'image': image, 'label': label}
-
-
+    
 class Resize3D(object):
+    
     def __init__(self, output_size):
+        # output_size should be a tuple (new_w, new_h, new_d)
         self.output_size = output_size
 
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
+        
+        # Ensure the image and label are 3D (w, h, d)
         assert len(image.shape) == 3, "Input image should be 3D (w, h, d)"
         assert len(label.shape) == 3, "Input label should be 3D (w, h, d)"
         
         (w, h, d) = image.shape
         label = label.astype(bool)
 
+        # Resize image and label using skimage.transform.resize
         image = sk_trans.resize(image, self.output_size, order=1, mode='constant', cval=0)
         label = sk_trans.resize(label, self.output_size, order=0)  # Keep binary labels
         
+        # Assert that the resized label is still binary (0 or 1)
         assert(np.max(label) == 1 and np.min(label) == 0)
         assert(np.unique(label).shape[0] == 2)
         
         return {'image': image, 'label': label}
-
-
+    
+    
 class CenterCrop(object):
     def __init__(self, output_size):
         self.output_size = output_size
 
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
-        if label.shape[0] <= self.output_size[0] or label.shape[1] <= self.output_size[1] or label.shape[2] <= self.output_size[2]:
+
+        # pad the sample if necessary
+        if label.shape[0] <= self.output_size[0] or label.shape[1] <= self.output_size[1] or label.shape[2] <= \
+                self.output_size[2]:
             pw = max((self.output_size[0] - label.shape[0]) // 2 + 3, 0)
             ph = max((self.output_size[1] - label.shape[1]) // 2 + 3, 0)
             pd = max((self.output_size[2] - label.shape[2]) // 2 + 3, 0)
@@ -221,6 +272,7 @@ class CenterCrop(object):
             label = np.pad(label, [(pw, pw), (ph, ph), (pd, pd)], mode='constant', constant_values=0)
 
         (w, h, d) = image.shape
+
         w1 = int(round((w - self.output_size[0]) / 2.))
         h1 = int(round((h - self.output_size[1]) / 2.))
         d1 = int(round((d - self.output_size[2]) / 2.))
@@ -229,8 +281,6 @@ class CenterCrop(object):
         image = image[w1:w1 + self.output_size[0], h1:h1 + self.output_size[1], d1:d1 + self.output_size[2]]
 
         return {'image': image, 'label': label}
-
-# Additional classes for noise, blur, gamma, etc. are unchanged from before.
 
 
 class RandomCrop(object):
