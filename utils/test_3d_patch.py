@@ -18,13 +18,13 @@ def getLargestCC(segmentation):
     return largestCC
 
 def var_all_case_LA(root_path, model, num_classes, patch_size=(96, 96, 96), stride_xy=18, stride_z=4):
-    with open(f'{root_path}/val.list', 'r') as f:
+    with open(f'{root_path}/val.txt', 'r') as f:
         image_list = f.readlines()
         
     if 'LA' in root_path:
         image_list = ["../data/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in image_list]
     else:
-        image_list = [f"{root_path}/data/" + item.replace('\n', '') for item in image_list]
+        image_list = [f"{root_path}/" + item.replace('\n', '') for item in image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
     for image_path in loader:
