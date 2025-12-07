@@ -77,31 +77,34 @@ class BraTS(Dataset):
     def __len__(self):
         return len(self.sample_list)
 
-    def __getitem__(self, idx):
-        case = self.sample_list[idx]
-        
-        # Construct the path to the patient's data directory
-        patient_dir = os.path.join(self._base_dir, 'data', case)
-        
-        # Get all the *.h5 files for this patient
-        h5_files = glob(os.path.join(patient_dir, '*.h5'))
+def __getitem__(self, idx):
+    case = self.sample_list[idx]
+    
+    # Construct the path to the patient's data directory
+    patient_dir = os.path.join(self._base_dir, 'data', case)
+    
+    print(f"Looking for .h5 files in: {patient_dir}")  # Debugging line
+    
+    # Get all the *.h5 files for this patient
+    h5_files = glob(os.path.join(patient_dir, '*.h5'))
 
-        if len(h5_files) == 0:
-            raise FileNotFoundError(f"No .h5 files found for patient {case}. Check if the .h5 file exists in {patient_dir}")
+    if len(h5_files) == 0:
+        raise FileNotFoundError(f"No .h5 files found for patient {case}. Check if the .h5 file exists in {patient_dir}")
 
-        # Load the first .h5 file (you can modify this if needed to load multiple files)
-        h5f = h5py.File(h5_files[0], 'r')
-        
-        image = h5f['image'][:]
-        label = h5f['label'][:]
-        
-        sample = {'image': image, 'label': label}
-        
-        if self.transform:
-            sample = self.transform(sample)
-        
-        sample['case'] = case
-        return sample
+    # Load the first .h5 file
+    h5f = h5py.File(h5_files[0], 'r')
+    
+    image = h5f['image'][:]
+    label = h5f['label'][:]
+    
+    sample = {'image': image, 'label': label}
+    
+    if self.transform:
+        sample = self.transform(sample)
+    
+    sample['case'] = case
+    return sample
+
 
 
 
