@@ -428,19 +428,19 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "../model/{}/ours/{}_{}_labeled/pre_train".format(dataset, args.exp, args.labelnum)
-    self_snapshot_path = "../model/{}/ours/{}_{}_labeled/self_train".format(dataset, args.exp, args.labelnum)
+    pre_snapshot_path = "/content/drive/MyDrive/Research/models/DualMatch/{}/ours/{}_{}_labeled/pre_train".format(dataset, args.exp, args.labelnum)
+    self_snapshot_path = "/content/drive/MyDrive/Research/models/DualMatch/{}/ours/{}_{}_labeled/self_train".format(dataset, args.exp, args.labelnum)
     print("Starting BCP training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
         if os.path.exists(snapshot_path + '/code'):
             shutil.rmtree(snapshot_path + '/code')
-    shutil.copy('../code/train_duetmatch.py', self_snapshot_path)
+    shutil.copy('/content/drive/MyDrive/Research/DuetMatch/train_duetmatch.py', self_snapshot_path)
     
     logging.basicConfig(filename=pre_snapshot_path+"/log.txt", level=logging.INFO, format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
     pre_train(args, pre_snapshot_path)
 
-    self_train(args, pre_snapshot_path, self_snapshot_path)
+    # self_train(args, pre_snapshot_path, self_snapshot_path)
