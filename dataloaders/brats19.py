@@ -57,7 +57,6 @@ class BraTS(Dataset):
         self.split = split
         self.transform = transform
 
-        # Load the list of patients based on the split
         if self.split == 'train':
             with open(self._base_dir + '/train.txt', 'r') as f1:
                 self.sample_list = f1.readlines()
@@ -68,7 +67,7 @@ class BraTS(Dataset):
             with open(self._base_dir + '/test.txt', 'r') as f:
                 self.sample_list = f.readlines()
 
-        self.sample_list = [item.strip() for item in self.sample_list]  # Remove any newline characters
+        self.sample_list = [item.strip() for item in self.sample_list]
         if num is not None and self.split == "train":
             self.sample_list = self.sample_list[:num]
         
@@ -77,36 +76,66 @@ class BraTS(Dataset):
     def __len__(self):
         return len(self.sample_list)
 
-def __getitem__(self, idx):
-    case = self.sample_list[idx]
-    
-    # Construct the path to the patient's data directory
-    patient_dir = os.path.join(self._base_dir, 'data', case)
-    
-    print(f"Looking for .h5 files in: {patient_dir}")  # Debugging line
-    
-    # Get all the *.h5 files for this patient
-    h5_files = glob(os.path.join(patient_dir, '*.h5'))
+    def __getitem__(self, idx):
+        case = self.sample_list[idx]
+        patient_dir = os.path.join(self._base_dir, 'data', case)
+        h5_files = glob(os.path.join(patient_dir, '*.h5'))
 
-    if len(h5_files) == 0:
-        raise FileNotFoundError(f"No .h5 files found for patient {case}. Check if the .h5 file exists in {patient_dir}")
+        if len(h5_files) == 0:
+            raise FileNotFoundError(f"No .h5 files found for patient {case}. Check if the .h5 file exists in {patient_dir}")
 
-    # Load the first .h5 file
-    h5f = h5py.File(h5_files[0], 'r')
-    
-    image = h5f['image'][:]
-    label = h5f['label'][:]
-    
-    sample = {'image': image, 'label': label}
-    
-    if self.transform:
-        sample = self.transform(sample)
-    
-    sample['case'] = case
-    return sample
+        # Load the first .h5 file
+        h5f = h5py.File(h5_files[0], 'r')
+        image = h5f['image'][:]
+        label = h5f['label'][:]
+
+        sample = {'image': image, 'label': label}
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        sample['case'] = case
+        return sample
 
 
 
+
+# class BaseDataSets(Dataset):
+#     def __init__(self, base_dir=None, split='train', num=None, transform=None):
+#         self._base_dir = base_dir
+#         self.sample_list = []
+#         self.split = split
+#         self.transform = transform
+#         if self.split == 'train':
+#             with open(self._base_dir + '/train_slices.list', 'r') as f1:
+#                 self.sample_list = f1.readlines()
+#             self.sample_list = [item.replace('\n', '') for item in self.sample_list]
+
+#         elif self.split == 'val':
+#             with open(self._base_dir + '/val.list', 'r') as f:
+#                 self.sample_list = f.readlines()
+#             self.sample_list = [item.replace('\n', '') for item in self.sample_list]
+#         if num is not None and self.split == "train":
+#             self.sample_list = self.sample_list[:num]
+#         print("total {} samples".format(len(self.sample_list)))
+
+#     def __len__(self):
+#         return len(self.sample_list)
+
+#     def __getitem__(self, idx):
+#         case = self.sample_list[idx]
+#         if self.split == "train":
+#             h5f = h5py.File(self._base_dir + "/data/{}/{}.h5".format(case), 'r')
+#         else:
+#             h5f = h5py.File(self._base_dir + "/data/{}/{}.h5".format(case), 'r')
+#         image = h5f['image'][:]
+#         label = h5f['label'][:]
+#         sample = {'image': image, 'label': label}
+#         if self.split == "train":
+#             sample = self.transform(sample)
+#         # sample["idx"] = idx
+#         sample['case'] = case
+#         return sample
 
 class BaseDataSets(Dataset):
     def __init__(self, base_dir=None, split='train', num=None, transform=None):
@@ -114,36 +143,37 @@ class BaseDataSets(Dataset):
         self.sample_list = []
         self.split = split
         self.transform = transform
+
         if self.split == 'train':
             with open(self._base_dir + '/train_slices.list', 'r') as f1:
                 self.sample_list = f1.readlines()
-            self.sample_list = [item.replace('\n', '') for item in self.sample_list]
-
         elif self.split == 'val':
             with open(self._base_dir + '/val.list', 'r') as f:
                 self.sample_list = f.readlines()
-            self.sample_list = [item.replace('\n', '') for item in self.sample_list]
+
+        self.sample_list = [item.strip() for item in self.sample_list]
         if num is not None and self.split == "train":
             self.sample_list = self.sample_list[:num]
-        print("total {} samples".format(len(self.sample_list)))
+        
+        print(f"Total {len(self.sample_list)} samples for {self.split} split.")
 
     def __len__(self):
         return len(self.sample_list)
 
     def __getitem__(self, idx):
         case = self.sample_list[idx]
-        if self.split == "train":
-            h5f = h5py.File(self._base_dir + "/data/{}/{}.h5".format(case), 'r')
-        else:
-            h5f = h5py.File(self._base_dir + "/data/{}/{}.h5".format(case), 'r')
+        h5f = h5py.File(self._base_dir + "/data/{}/{}.h5".format(case, case), 'r')
         image = h5f['image'][:]
         label = h5f['label'][:]
         sample = {'image': image, 'label': label}
-        if self.split == "train":
+
+        if self.transform:
             sample = self.transform(sample)
-        # sample["idx"] = idx
+
         sample['case'] = case
         return sample
+
+
 
 def random_rot_flip(image, label):
     k = np.random.randint(0, 4)
