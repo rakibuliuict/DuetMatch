@@ -443,4 +443,4 @@ if __name__ == "__main__":
     logging.info(str(args))
     pre_train(args, pre_snapshot_path)
 
-    # self_train(args, pre_snapshot_path, self_snapshot_path)
+    self_train(args, pre_snapshot_path, self_snapshot_path)
