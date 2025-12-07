@@ -281,7 +281,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                           RandomCrop(patch_size),
                           ToTensor(),
                           ]))
-    labelnum = labeled_ratio_to_patients(args.root_path,args.labelnum)
+    labelnum = labeled_ratio_to_patients(args.root_path,args.labelnum) 
     labeled_idxs = list(range(labelnum))
     unlabeled_idxs = list(range(labelnum, len(db_train)))
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size, args.batch_size-args.labeled_bs)
