@@ -225,7 +225,7 @@ def pre_train(args, snapshot_path):
             optimizer.step()
             logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f'%(iter_num, loss, loss_dice, loss_ce))
 
-            if iter_num % 20 == 0:
+            if iter_num % 300 == 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_LA(args.root_path, model, num_classes=num_classes, patch_size=patch_size, stride_xy=64, stride_z=64)
                 if dice_sample > best_dice:
