@@ -50,7 +50,7 @@ def var_all_case_LA(root_path, model, num_classes, patch_size=(96, 96, 96), stri
         image_list = ["../data/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in image_list]
     else:
         # Modify this to point to the correct path for the .h5 files
-        image_list = [os.path.join(root_path, item.strip(), f"{item.strip()}_flair.h5") for item in image_list]
+        image_list = [os.path.join(root_path, item.strip(), f"{item.strip()}.h5") for item in image_list]
 
     loader = tqdm(image_list)
     total_dice = 0.0
