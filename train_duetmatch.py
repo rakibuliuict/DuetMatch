@@ -34,7 +34,7 @@ from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask, mix_loss, parameter_sharing
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/content/drive/MyDrive/Research/Dataset/data/BraTS19', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/content/drive/MyDrive/Research/Dataset/data/brats2019', help='Name of Dataset')
 parser.add_argument('--exp', type=str,  default='test', help='exp_name')
 parser.add_argument('--model', type=str, default='VNet', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int,  default=1000, help='maximum pre-train iteration to train')
