@@ -1,4 +1,5 @@
 import h5py
+import os
 import math
 import nibabel as nib
 import numpy as np
@@ -17,29 +18,65 @@ def getLargestCC(segmentation):
         largestCC = segmentation
     return largestCC
 
+# def var_all_case_LA(root_path, model, num_classes, patch_size=(96, 96, 96), stride_xy=18, stride_z=4):
+#     with open(f'{root_path}/val.txt', 'r') as f:
+#         image_list = f.readlines()
+        
+#     if 'LA' in root_path:
+#         image_list = ["../data/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in image_list]
+#     else:
+#         image_list = [f"{root_path}/" + item.replace('\n', '') for item in image_list]
+#     loader = tqdm(image_list)
+#     total_dice = 0.0
+#     for image_path in loader:
+#         h5f = h5py.File(image_path, 'r')
+#         image = h5f['image'][:]
+#         label = h5f['label'][:]
+#         prediction, score_map = test_single_case(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
+#         if np.sum(prediction)==0:
+#             dice = 0
+#         else:
+#             dice = metric.binary.dc(prediction, label)
+#         total_dice += dice
+#     avg_dice = total_dice / len(image_list)
+#     print('average metric is {}'.format(avg_dice))
+#     return avg_dice
+
 def var_all_case_LA(root_path, model, num_classes, patch_size=(96, 96, 96), stride_xy=18, stride_z=4):
     with open(f'{root_path}/val.txt', 'r') as f:
         image_list = f.readlines()
-        
+
     if 'LA' in root_path:
         image_list = ["../data/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in image_list]
     else:
-        image_list = [f"{root_path}/" + item.replace('\n', '') for item in image_list]
+        # Modify this to point to the correct path for the .h5 files
+        image_list = [os.path.join(root_path, item.strip(), f"{item.strip()}_flair.h5") for item in image_list]
+
     loader = tqdm(image_list)
     total_dice = 0.0
+
     for image_path in loader:
-        h5f = h5py.File(image_path, 'r')
-        image = h5f['image'][:]
-        label = h5f['label'][:]
-        prediction, score_map = test_single_case(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
-        if np.sum(prediction)==0:
-            dice = 0
-        else:
-            dice = metric.binary.dc(prediction, label)
-        total_dice += dice
+        try:
+            h5f = h5py.File(image_path, 'r')  # Open the h5 file
+            image = h5f['image'][:]  # Assuming the image is stored under the 'image' key in the h5 file
+            label = h5f['label'][:]  # Assuming the label is stored under the 'label' key in the h5 file
+            prediction, score_map = test_single_case(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
+
+            if np.sum(prediction) == 0:
+                dice = 0
+            else:
+                dice = metric.binary.dc(prediction, label)
+            total_dice += dice
+
+        except KeyError as e:
+            print(f"KeyError: Could not find the expected key in the HDF5 file: {e}")
+        except Exception as e:
+            print(f"Error processing file {image_path}: {e}")
+
     avg_dice = total_dice / len(image_list)
-    print('average metric is {}'.format(avg_dice))
+    print(f'Average Dice score is {avg_dice}')
     return avg_dice
+
 
 def test_all_case(model, image_list, num_classes, patch_size=(96, 96, 96), stride_xy=18, stride_z=4, save_result=True, test_save_path=None, preproc_fn=None, metric_detail=0, nms=0):
     
