@@ -89,7 +89,7 @@ class BraTS(Dataset):
         if len(h5_files) == 0:
             raise FileNotFoundError(f"No .h5 files found for patient {case}. Check if the .h5 file exists in {patient_dir}")
 
-        # You can load the first .h5 file (or modify this if you want to load multiple files)
+        # Load the first .h5 file (you can modify this if needed to load multiple files)
         h5f = h5py.File(h5_files[0], 'r')
         
         image = h5f['image'][:]
@@ -102,6 +102,7 @@ class BraTS(Dataset):
         
         sample['case'] = case
         return sample
+
 
 
 class BaseDataSets(Dataset):
