@@ -1,6 +1,7 @@
 
 from asyncore import write
-import imp
+# import imp
+
 import os
 from sre_parse import SPECIAL_CHARS
 import sys
