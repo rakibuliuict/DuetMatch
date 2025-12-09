@@ -29,8 +29,8 @@ elif 'isles2022' in FLAGS.root_path:
 print('Testing on', dataset)
 
 os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpu
-snapshot_path = "../model/{}/ours/{}_{}_labeled/{}".format(dataset, FLAGS.exp, FLAGS.labelnum, FLAGS.stage_name)
-test_save_path = "../model/{}/ours/{}_{}_labeled/{}_predictions/".format(dataset, FLAGS.exp, FLAGS.labelnum, FLAGS.model)
+snapshot_path = "/content/drive/MyDrive/Research/models/DualMatch/{}/ours/{}_{}_labeled/{}".format(dataset, FLAGS.exp, FLAGS.labelnum, FLAGS.stage_name)
+test_save_path = "/content/drive/MyDrive/Research/models/DualMatch/{}/ours/{}_{}_labeled/{}_predictions/".format(dataset, FLAGS.exp, FLAGS.labelnum, FLAGS.model)
 num_classes = 2
 
 if not os.path.exists(test_save_path):
