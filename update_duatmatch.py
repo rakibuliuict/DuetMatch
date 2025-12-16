@@ -528,7 +528,7 @@ if __name__ == "__main__":
 
     # keep your copy behavior
     try:
-        shutil.copy('/content/drive/MyDrive/Research/DuetMatch/train_duetmatch.py', self_snapshot_path)
+        shutil.copy('/content/drive/MyDrive/Research/DuetMatch/update_duatmatch.py', self_snapshot_path)
     except Exception:
         pass
 
