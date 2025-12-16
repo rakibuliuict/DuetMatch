@@ -165,58 +165,82 @@ def rampup_factor(iter_num, rampup_iters):
     return float(ramps.sigmoid_rampup(x * rampup_iters, rampup_iters))
 
 
-def mix_consecutive_pairs(tensor, mask):
+def _prepare_pair_mask(mask, B, spatial, device, dtype=torch.float32):
     """
-    Pairwise mix consecutive pairs: (0,1), (2,3), ... using mask.
-
-    tensor: (B, ...)   e.g. (B,1,D,H,W) or (B,D,H,W) or (B,C,D,H,W)
-    mask:   any of (D,H,W) or (1,D,H,W) or (B,D,H,W) or (B,1,D,H,W)
-            or broadcastable to tensor.
+    Returns mask shaped (B, 1, D, H, W) float in [0,1], broadcastable to images/logits.
+    Accepts mask in (D,H,W), (1,D,H,W), (B,D,H,W), (B,1,D,H,W).
     """
-    B = tensor.size(0)
-    assert B % 2 == 0, "Batch size must be even for pair mixing."
-
     m = mask
     if not torch.is_tensor(m):
-        m = torch.tensor(m, device=tensor.device, dtype=tensor.dtype)
+        m = torch.tensor(m, device=device, dtype=dtype)
     else:
-        m = m.to(device=tensor.device, dtype=tensor.dtype)
-
-    spatial = tensor.shape[-3:]  # (D,H,W)
+        m = m.to(device=device, dtype=dtype)
 
     if m.dim() == 3 and tuple(m.shape) == tuple(spatial):
         m = m.unsqueeze(0).unsqueeze(0)  # (1,1,D,H,W)
     elif m.dim() == 4 and tuple(m.shape[-3:]) == tuple(spatial) and m.size(0) == 1:
-        m = m.unsqueeze(1)  # (1,1,D,H,W)
+        m = m.unsqueeze(1)               # (1,1,D,H,W)
     elif m.dim() == 4 and tuple(m.shape[-3:]) == tuple(spatial) and m.size(0) == B:
-        m = m.unsqueeze(1)  # (B,1,D,H,W)
+        m = m.unsqueeze(1)               # (B,1,D,H,W)
     elif m.dim() == 5 and tuple(m.shape[-3:]) == tuple(spatial):
         pass
     else:
-        raise RuntimeError(f"Unexpected mask shape {tuple(m.shape)} for tensor shape {tuple(tensor.shape)}")
+        raise RuntimeError(f"Unexpected mask shape {tuple(m.shape)} for spatial {spatial} and batch {B}")
 
     if m.size(0) == 1 and B > 1:
-        m = m.expand(B, *m.shape[1:])
+        m = m.expand(B, *m.shape[1:])    # (B,1,D,H,W)
 
-    if tensor.dim() == 4 and m.dim() == 5 and m.size(1) == 1:
-        m = m.squeeze(1)
+    return m
 
-    out = tensor.clone()
-    idx0 = torch.arange(0, B, 2, device=tensor.device)
+
+def mix_images_pairs(x, mask):
+    """
+    x: (B, C, D, H, W) float
+    mask: broadcastable; uses soft mixing x0*m + x1*(1-m)
+    """
+    B = x.size(0)
+    assert B % 2 == 0, "Batch size must be even."
+    spatial = x.shape[-3:]
+    m = _prepare_pair_mask(mask, B, spatial, x.device, dtype=x.dtype)  # (B,1,D,H,W)
+
+    out = x.clone()
+    idx0 = torch.arange(0, B, 2, device=x.device)
     idx1 = idx0 + 1
 
-    out[idx0] = tensor[idx0] * m[idx0] + tensor[idx1] * (1.0 - m[idx0])
-    out[idx1] = tensor[idx1] * m[idx1] + tensor[idx0] * (1.0 - m[idx1])
+    out[idx0] = x[idx0] * m[idx0] + x[idx1] * (1.0 - m[idx0])
+    out[idx1] = x[idx1] * m[idx1] + x[idx0] * (1.0 - m[idx1])
+    return out
 
+
+def mix_labels_pairs(y, mask):
+    """
+    y: (B, D, H, W) long  (or (B,1,D,H,W) long -> will squeeze)
+    mask: CutMix selection. No interpolation. Output stays long.
+    """
+    if y.dim() == 5 and y.size(1) == 1:
+        y = y.squeeze(1)
+
+    B = y.size(0)
+    assert B % 2 == 0, "Batch size must be even."
+    spatial = y.shape[-3:]
+    m = _prepare_pair_mask(mask, B, spatial, y.device, dtype=torch.float32)  # float mask
+    m = (m[:, 0] >= 0.5)  # (B,D,H,W) boolean selection
+
+    out = y.clone()
+    idx0 = torch.arange(0, B, 2, device=y.device)
+    idx1 = idx0 + 1
+
+    out[idx0] = torch.where(m[idx0], y[idx0], y[idx1])
+    out[idx1] = torch.where(m[idx1], y[idx1], y[idx0])
     return out
 
 
 # ------------------------- Pretrain Improvements -------------------------
 def focal_loss_multiclass(logits, target, alpha_pos=0.75, gamma=2.0, eps=1e-8):
-    logp = F.log_softmax(logits, dim=1)  # (B,C,D,H,W)
+    logp = F.log_softmax(logits, dim=1)
     p = torch.exp(logp)
 
-    t = target.unsqueeze(1)  # (B,1,D,H,W)
+    t = target.unsqueeze(1)
     p_t = torch.gather(p, dim=1, index=t).squeeze(1).clamp_min(eps)
     logp_t = torch.gather(logp, dim=1, index=t).squeeze(1)
 
@@ -242,7 +266,7 @@ def morphological_boundary_map(mask_float, k=3):
 
 
 def boundary_loss_from_logits(logits, target):
-    probs = F.softmax(logits, dim=1)[:, 1:2, ...]  # (B,1,D,H,W)
+    probs = F.softmax(logits, dim=1)[:, 1:2, ...]
     gt = (target == 1).float().unsqueeze(1)
     b_pred = morphological_boundary_map(probs, k=3)
     b_gt = morphological_boundary_map(gt, k=3)
@@ -467,9 +491,9 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 rel_mask_enc = agree_enc * gate
                 rel_mask_dec = agree_dec * gate
 
-            mixed_img = mix_consecutive_pairs(unimg, img_mask)
-            mixed_plab_enc = mix_consecutive_pairs(enc_plab_ulb, img_mask)
-            mixed_plab_dec = mix_consecutive_pairs(dec_plab_ulb, img_mask)
+            mixed_img = mix_images_pairs(unimg, img_mask)
+            mixed_plab_enc = mix_labels_pairs(enc_plab_ulb, img_mask)
+            mixed_plab_dec = mix_labels_pairs(dec_plab_ulb, img_mask)
 
             mixed_rel_enc = rel_mask_enc * loss_mask + rel_mask_enc.flip(0) * (1.0 - loss_mask)
             mixed_rel_dec = rel_mask_dec * loss_mask + rel_mask_dec.flip(0) * (1.0 - loss_mask)
