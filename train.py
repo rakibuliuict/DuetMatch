@@ -36,6 +36,10 @@ parser.add_argument('--labelnum', type=int, default=10, help='Labeled ratio inde
 parser.add_argument('--gpu', type=str, default='1', help='GPU id')
 parser.add_argument('--seed', type=int, default=1337, help='Seed')
 
+# Run control
+parser.add_argument('--skip_pretrain', action='store_true', help='Skip pretraining and start self training from saved best pretrain model')
+parser.add_argument('--pretrained_ckpt', type=str, default='', help='Optional: explicit checkpoint path to start self-train')
+
 # Pretrain improvements
 parser.add_argument('--focal_gamma', type=float, default=2.0, help='Focal gamma')
 parser.add_argument('--focal_alpha', type=float, default=0.75, help='Focal alpha for positive class')
@@ -44,9 +48,6 @@ parser.add_argument('--lambda_dice', type=float, default=0.5, help='Dice weight 
 parser.add_argument('--lambda_focal', type=float, default=0.5, help='Focal weight in pretraining')
 
 # SSL improvements (self-train)
-parser.add_argument('--consistency', type=float, default=1.0, help='Base consistency weight')
-parser.add_argument('--consistency_rampup', type=float, default=40.0, help='(kept)')
-
 parser.add_argument('--mask_ratio', type=float, default=2/3, help='Ratio of context mask')
 
 parser.add_argument('--pl_conf_thres', type=float, default=0.7, help='Confidence threshold (0.6~0.8)')
@@ -107,8 +108,11 @@ def save_net_opt(net, optimizer, path):
 
 
 def load_net(net, path):
-    state = torch.load(str(path))
-    net.load_state_dict(state['net'])
+    state = torch.load(str(path), map_location='cpu')
+    if isinstance(state, dict) and 'net' in state:
+        net.load_state_dict(state['net'])
+    else:
+        net.load_state_dict(state)
 
 
 @torch.no_grad()
@@ -163,14 +167,14 @@ def rampup_factor(iter_num, rampup_iters):
 
 def mix_consecutive_pairs(tensor, mask):
     """
-    Mix consecutive pairs (0,1), (2,3), ... using mask.
+    Pairwise mix consecutive pairs: (0,1), (2,3), ... using mask.
 
-    tensor: (B, ...) e.g. (B,1,D,H,W) or (B,D,H,W)
-    mask:   can be (D,H,W) or (B,D,H,W) or (B,1,D,H,W)
-            will be expanded to (B,1,D,H,W) (or broadcastable) automatically.
+    tensor: (B, ...)   e.g. (B,1,D,H,W) or (B,D,H,W) or (B,C,D,H,W)
+    mask:   any of (D,H,W) or (1,D,H,W) or (B,D,H,W) or (B,1,D,H,W)
+            or broadcastable to tensor.
     """
     B = tensor.size(0)
-    assert B % 2 == 0, "Batch size must be even for consecutive pair mixing."
+    assert B % 2 == 0, "Batch size must be even for pair mixing."
 
     m = mask
     if not torch.is_tensor(m):
@@ -178,63 +182,50 @@ def mix_consecutive_pairs(tensor, mask):
     else:
         m = m.to(device=tensor.device, dtype=tensor.dtype)
 
-    # ---- Ensure mask has batch dimension ----
-    # Common cases for 3D:
-    #   tensor: (B,1,D,H,W)
-    #   mask:   (D,H,W)  -> expand to (B,1,D,H,W)
-    if m.dim() == tensor.dim() - 2:
-        # (D,H,W) -> (1,1,D,H,W) -> (B,1,D,H,W)
-        m = m.unsqueeze(0).unsqueeze(0).expand(B, 1, *m.shape)
-    elif m.dim() == tensor.dim() - 1:
-        # could be (B,D,H,W) or (D,H,W) mistakenly
-        if m.size(0) == B:
-            # (B,D,H,W) -> (B,1,D,H,W)
-            m = m.unsqueeze(1)
-        else:
-            # (D,H,W) -> expand batch
-            m = m.unsqueeze(0).unsqueeze(0).expand(B, 1, *m.shape)
-    elif m.dim() == tensor.dim():
-        # (B,1,D,H,W) OK (or (B,C,D,H,W) but we don't need C>1 for masks)
-        if m.size(0) != B:
-            raise RuntimeError(f"Mask batch {m.size(0)} != tensor batch {B}")
-    else:
-        raise RuntimeError(f"Unexpected mask dims {m.dim()} for tensor dims {tensor.dim()}")
+    spatial = tensor.shape[-3:]  # (D,H,W)
 
-    # ---- Broadcast mask to tensor shape if needed ----
-    # If tensor is (B,D,H,W) and mask is (B,1,D,H,W), squeeze channel
+    if m.dim() == 3 and tuple(m.shape) == tuple(spatial):
+        m = m.unsqueeze(0).unsqueeze(0)  # (1,1,D,H,W)
+    elif m.dim() == 4 and tuple(m.shape[-3:]) == tuple(spatial) and m.size(0) == 1:
+        m = m.unsqueeze(1)  # (1,1,D,H,W)
+    elif m.dim() == 4 and tuple(m.shape[-3:]) == tuple(spatial) and m.size(0) == B:
+        m = m.unsqueeze(1)  # (B,1,D,H,W)
+    elif m.dim() == 5 and tuple(m.shape[-3:]) == tuple(spatial):
+        pass
+    else:
+        raise RuntimeError(f"Unexpected mask shape {tuple(m.shape)} for tensor shape {tuple(tensor.shape)}")
+
+    if m.size(0) == 1 and B > 1:
+        m = m.expand(B, *m.shape[1:])
+
     if tensor.dim() == 4 and m.dim() == 5 and m.size(1) == 1:
         m = m.squeeze(1)
 
-    # Now make sure m can broadcast with tensor
-    # (B,1,D,H,W) will broadcast to (B,C,D,H,W) if needed
+    out = tensor.clone()
+    idx0 = torch.arange(0, B, 2, device=tensor.device)
+    idx1 = idx0 + 1
 
-    # ---- Pairwise mix ----
-    t = tensor.view(B // 2, 2, *tensor.shape[1:])
-    m_pair = m.view(B // 2, 2, *m.shape[1:])
+    out[idx0] = tensor[idx0] * m[idx0] + tensor[idx1] * (1.0 - m[idx0])
+    out[idx1] = tensor[idx1] * m[idx1] + tensor[idx0] * (1.0 - m[idx1])
 
-    mixed = t * m_pair + t.flip(1) * (1.0 - m_pair)
-    return mixed.view(B, *tensor.shape[1:])
-
+    return out
 
 
 # ------------------------- Pretrain Improvements -------------------------
 def focal_loss_multiclass(logits, target, alpha_pos=0.75, gamma=2.0, eps=1e-8):
-    """
-    logits: (B,C,D,H,W), target: (B,D,H,W) long in [0..C-1]
-    For binary C=2. Uses class-wise alpha: alpha_pos for class 1, 1-alpha_pos for class 0.
-    Returns scalar.
-    """
     logp = F.log_softmax(logits, dim=1)  # (B,C,D,H,W)
     p = torch.exp(logp)
 
-    # gather p_t and logp_t
     t = target.unsqueeze(1)  # (B,1,D,H,W)
-    p_t = torch.gather(p, dim=1, index=t).squeeze(1).clamp_min(eps)       # (B,D,H,W)
-    logp_t = torch.gather(logp, dim=1, index=t).squeeze(1)                # (B,D,H,W)
+    p_t = torch.gather(p, dim=1, index=t).squeeze(1).clamp_min(eps)
+    logp_t = torch.gather(logp, dim=1, index=t).squeeze(1)
 
-    # alpha per voxel (binary)
     if logits.size(1) == 2:
-        alpha = torch.where(target == 1, torch.tensor(alpha_pos, device=logits.device), torch.tensor(1.0 - alpha_pos, device=logits.device))
+        alpha = torch.where(
+            target == 1,
+            torch.tensor(alpha_pos, device=logits.device),
+            torch.tensor(1.0 - alpha_pos, device=logits.device)
+        )
     else:
         alpha = torch.ones_like(p_t)
 
@@ -243,11 +234,6 @@ def focal_loss_multiclass(logits, target, alpha_pos=0.75, gamma=2.0, eps=1e-8):
 
 
 def morphological_boundary_map(mask_float, k=3):
-    """
-    mask_float: (B,1,D,H,W) float in [0,1] (can be GT {0,1} or probability)
-    returns: (B,1,D,H,W) float boundary strength in [0,1] (soft)
-    boundary ≈ dilate - erode (morphological gradient)
-    """
     pad = k // 2
     dil = F.max_pool3d(mask_float, kernel_size=k, stride=1, padding=pad)
     ero = -F.max_pool3d(-mask_float, kernel_size=k, stride=1, padding=pad)
@@ -256,14 +242,8 @@ def morphological_boundary_map(mask_float, k=3):
 
 
 def boundary_loss_from_logits(logits, target):
-    """
-    logits: (B,2,D,H,W)
-    target: (B,D,H,W) long (0/1)
-    boundary loss: L1 between morphological gradient of predicted fg prob and GT boundary map.
-    """
     probs = F.softmax(logits, dim=1)[:, 1:2, ...]  # (B,1,D,H,W)
-    gt = (target == 1).float().unsqueeze(1)        # (B,1,D,H,W)
-
+    gt = (target == 1).float().unsqueeze(1)
     b_pred = morphological_boundary_map(probs, k=3)
     b_gt = morphological_boundary_map(gt, k=3)
     return F.l1_loss(b_pred, b_gt)
@@ -315,10 +295,7 @@ def pre_train(args, snapshot_path):
 
             logits, _ = model(volume)
 
-            # Pretrain loss = focal + dice + boundary
-            loss_focal = focal_loss_multiclass(
-                logits, target, alpha_pos=args.focal_alpha, gamma=args.focal_gamma
-            )
+            loss_focal = focal_loss_multiclass(logits, target, alpha_pos=args.focal_alpha, gamma=args.focal_gamma)
             loss_dice = DICE(logits, target)
             loss_bd = boundary_loss_from_logits(logits, target)
 
@@ -359,14 +336,16 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     decoder_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     inference_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
 
-    pretrained_path = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
+    if args.pretrained_ckpt and os.path.exists(args.pretrained_ckpt):
+        pretrained_path = args.pretrained_ckpt
+    else:
+        pretrained_path = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
+
     load_net(encoder_model, pretrained_path)
     load_net(decoder_model, pretrained_path)
 
-    # Freeze decoder of encoder_model
     for p in encoder_model.decoder.parameters():
         p.requires_grad = False
-    # Freeze encoder of decoder_model
     for p in decoder_model.encoder.parameters():
         p.requires_grad = False
 
@@ -421,14 +400,12 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             lab = target[:args.labeled_bs]
             unimg = volume[args.labeled_bs:]
 
-            # ------------------- supervised losses -------------------
             lb_logits_enc, _ = encoder_model(img)
             lb_logits_dec, _ = decoder_model(img)
 
             lb_loss_enc = 0.5 * F.cross_entropy(lb_logits_enc, lab) + 0.5 * DICE(lb_logits_enc, lab)
             lb_loss_dec = 0.5 * F.cross_entropy(lb_logits_dec, lab) + 0.5 * DICE(lb_logits_dec, lab)
 
-            # ------------------- unlabeled distillation (teacher=encoder clean, student=decoder perturbed) -------------------
             with torch.no_grad():
                 t_logits, _ = encoder_model(unimg)
                 _, t_conf, t_probs = get_plab_conf_probs(t_logits)
@@ -436,29 +413,26 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 w_ent = entropy_weight(t_probs, gamma=args.entropy_gamma)
                 w = w_conf * w_ent
 
-            s_logits_dec, feat_dec_drop = decoder_model(unimg, feature_perturb='dropout', p=0.6)
+            s_logits_dec, _ = decoder_model(unimg, feature_perturb='dropout', p=0.6)
 
-            kl_map = voxelwise_kl_temp(s_logits_dec, t_logits, T=args.temp)     # (B,D,H,W)
+            kl_map = voxelwise_kl_temp(s_logits_dec, t_logits, T=args.temp)
             u_kl = (kl_map * w).sum() / (w.sum() + 1e-6)
 
             s_probs = F.softmax(s_logits_dec, dim=1)
             t_probs_T1 = F.softmax(t_logits, dim=1)
             u_dice = soft_dice_consistency(s_probs, t_probs_T1, weight_map=w)
 
-            # ------------------- feature consistency for encoder branch -------------------
             with torch.no_grad():
                 _, feat_dec_clean = decoder_model(unimg)
             _, feat_enc_dropin = encoder_model(unimg, input_perturb='dropout', p=0.6)
             u_feat = F.mse_loss(feat_enc_dropin, feat_dec_clean)
 
-            # ------------------- ramp up unlabeled terms -------------------
             ru = rampup_factor(iter_num, args.u_rampup_iters)
             u_loss_total = ru * (args.lambda_kl * u_kl + args.lambda_dice_u * u_dice)
 
             loss_enc = lb_loss_enc + 0.5 * u_feat
             loss_dec = lb_loss_dec + u_loss_total
 
-            # ------------------- inference model for stability (EMA-mixed path) -------------------
             with torch.no_grad():
                 inference_model.decoder.load_state_dict(encoder_model.decoder.state_dict())
                 inference_model.encoder.load_state_dict(decoder_model.encoder.state_dict())
@@ -466,6 +440,18 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 inf_plab, inf_conf, inf_probs = get_plab_conf_probs(inf_logits)
 
                 img_mask, loss_mask = context_mask(unimg, args.mask_ratio)
+
+                if torch.is_tensor(loss_mask):
+                    loss_mask = loss_mask.to(device=unimg.device, dtype=unimg.dtype)
+                else:
+                    loss_mask = torch.tensor(loss_mask, device=unimg.device, dtype=unimg.dtype)
+
+                if loss_mask.dim() == 5 and loss_mask.size(1) == 1:
+                    loss_mask = loss_mask.squeeze(1)
+                elif loss_mask.dim() == 4 and loss_mask.size(0) == 1:
+                    loss_mask = loss_mask.expand(unimg.size(0), *loss_mask.shape[1:])
+                elif loss_mask.dim() == 3:
+                    loss_mask = loss_mask.unsqueeze(0).expand(unimg.size(0), *loss_mask.shape)
 
                 enc_logits_ulb, _ = encoder_model(unimg)
                 dec_logits_ulb, _ = decoder_model(unimg)
@@ -481,7 +467,6 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 rel_mask_enc = agree_enc * gate
                 rel_mask_dec = agree_dec * gate
 
-            # ------------------- pairwise mixing -------------------
             mixed_img = mix_consecutive_pairs(unimg, img_mask)
             mixed_plab_enc = mix_consecutive_pairs(enc_plab_ulb, img_mask)
             mixed_plab_dec = mix_consecutive_pairs(dec_plab_ulb, img_mask)
@@ -590,5 +575,7 @@ if __name__ == "__main__":
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
 
-    pre_train(args, pre_snapshot_path)
+    if not args.skip_pretrain:
+        pre_train(args, pre_snapshot_path)
+
     self_train(args, pre_snapshot_path, self_snapshot_path)
