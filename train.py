@@ -162,21 +162,59 @@ def rampup_factor(iter_num, rampup_iters):
 
 
 def mix_consecutive_pairs(tensor, mask):
+    """
+    Mix consecutive pairs (0,1), (2,3), ... using mask.
+
+    tensor: (B, ...) e.g. (B,1,D,H,W) or (B,D,H,W)
+    mask:   can be (D,H,W) or (B,D,H,W) or (B,1,D,H,W)
+            will be expanded to (B,1,D,H,W) (or broadcastable) automatically.
+    """
     B = tensor.size(0)
-    assert B % 2 == 0, "Batch size must be even for pair mixing."
+    assert B % 2 == 0, "Batch size must be even for consecutive pair mixing."
 
-    t = tensor.view(B // 2, 2, *tensor.shape[1:])  # (B/2,2,...)
-
-    if mask.dim() == tensor.dim() - 1:
-        m = mask
-        while m.dim() < tensor.dim():
-            m = m.unsqueeze(1)
+    m = mask
+    if not torch.is_tensor(m):
+        m = torch.tensor(m, device=tensor.device, dtype=tensor.dtype)
     else:
-        m = mask
+        m = m.to(device=tensor.device, dtype=tensor.dtype)
 
-    m = m.view(B // 2, 2, *m.shape[1:])
-    mixed = t * m + t.flip(1) * (1.0 - m)
+    # ---- Ensure mask has batch dimension ----
+    # Common cases for 3D:
+    #   tensor: (B,1,D,H,W)
+    #   mask:   (D,H,W)  -> expand to (B,1,D,H,W)
+    if m.dim() == tensor.dim() - 2:
+        # (D,H,W) -> (1,1,D,H,W) -> (B,1,D,H,W)
+        m = m.unsqueeze(0).unsqueeze(0).expand(B, 1, *m.shape)
+    elif m.dim() == tensor.dim() - 1:
+        # could be (B,D,H,W) or (D,H,W) mistakenly
+        if m.size(0) == B:
+            # (B,D,H,W) -> (B,1,D,H,W)
+            m = m.unsqueeze(1)
+        else:
+            # (D,H,W) -> expand batch
+            m = m.unsqueeze(0).unsqueeze(0).expand(B, 1, *m.shape)
+    elif m.dim() == tensor.dim():
+        # (B,1,D,H,W) OK (or (B,C,D,H,W) but we don't need C>1 for masks)
+        if m.size(0) != B:
+            raise RuntimeError(f"Mask batch {m.size(0)} != tensor batch {B}")
+    else:
+        raise RuntimeError(f"Unexpected mask dims {m.dim()} for tensor dims {tensor.dim()}")
+
+    # ---- Broadcast mask to tensor shape if needed ----
+    # If tensor is (B,D,H,W) and mask is (B,1,D,H,W), squeeze channel
+    if tensor.dim() == 4 and m.dim() == 5 and m.size(1) == 1:
+        m = m.squeeze(1)
+
+    # Now make sure m can broadcast with tensor
+    # (B,1,D,H,W) will broadcast to (B,C,D,H,W) if needed
+
+    # ---- Pairwise mix ----
+    t = tensor.view(B // 2, 2, *tensor.shape[1:])
+    m_pair = m.view(B // 2, 2, *m.shape[1:])
+
+    mixed = t * m_pair + t.flip(1) * (1.0 - m_pair)
     return mixed.view(B, *tensor.shape[1:])
+
 
 
 # ------------------------- Pretrain Improvements -------------------------
