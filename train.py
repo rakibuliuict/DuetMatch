@@ -655,26 +655,19 @@ parser.add_argument('--lambda_boundary', type=float, default=0.1, help='Boundary
 parser.add_argument('--lambda_dice', type=float, default=0.5, help='Dice weight in pretraining')
 parser.add_argument('--lambda_focal', type=float, default=0.5, help='Focal weight in pretraining')
 
-# SSL improvements (self-train)
+# SSL (self-train)
 parser.add_argument('--mask_ratio', type=float, default=2/3, help='Ratio of context mask')
-
-# You can keep these (some are now less important, but harmless)
-parser.add_argument('--pl_conf_thres', type=float, default=0.7, help='Confidence threshold (0.6~0.8)')
-parser.add_argument('--temp', type=float, default=2.0, help='Distillation temperature (>=1.0)')
-parser.add_argument('--entropy_gamma', type=float, default=2.0, help='Exponent for entropy-based weights (>=1)')
-parser.add_argument('--lambda_kl', type=float, default=1.0, help='(unused after U-Duet) Weight for KL consistency term')
-parser.add_argument('--lambda_dice_u', type=float, default=0.5, help='(unused after U-Duet) Weight for soft Dice consistency on unlabeled')
 parser.add_argument('--lambda_cps', type=float, default=0.5, help='Weight for CPS term')
 parser.add_argument('--u_rampup_iters', type=int, default=1500, help='Rampup iterations for unlabeled losses')
 
-# NEW: Uncertainty-Aware Duet hyperparams
+# Uncertainty-Aware Duet hyperparams
 parser.add_argument('--u_duet_alpha_feat', type=float, default=0.5, help='alpha for feature consistency in U-Duet')
 parser.add_argument('--u_duet_mu_ent', type=float, default=0.1, help='mu for entropy regularizer in U-Duet')
 parser.add_argument('--beta_max', type=float, default=1.0, help='beta max for uncertainty schedule')
 parser.add_argument('--beta_min', type=float, default=0.1, help='beta min for uncertainty schedule')
 parser.add_argument('--beta_decay', type=float, default=0.1, help='beta decay for uncertainty schedule')
 
-# NEW: Uncertainty-aware pseudo-label refinement
+# Uncertainty-aware pseudo-label refinement
 parser.add_argument('--pl_kappa', type=float, default=1.0, help='confidence sharpness exp(-kappa*entropy)')
 parser.add_argument('--pl_refine_thres', type=float, default=0.5, help='if conf < thres, replace PL with stable PL')
 
@@ -765,12 +758,6 @@ def uncertainty_weight(Hs, Ht, beta_t):
     return 1.0 / (torch.exp(beta_t * Hs) + torch.exp(beta_t * Ht) + 1e-8)  # (B,1,D,H,W)
 
 
-def weighted_feature_mse(Fs, Ft, w):
-    # Fs,Ft: (B,F,D,H,W), w:(B,1,D,H,W)
-    mse_map = (Fs - Ft).pow(2).mean(dim=1, keepdim=True)  # (B,1,D,H,W)
-    return (mse_map * w).mean()
-
-
 def soft_ce_map(student_logits, teacher_probs):
     # student_logits: (B,C,D,H,W), teacher_probs: (B,C,D,H,W) -> returns (B,D,H,W)
     logp = F.log_softmax(student_logits, dim=1)
@@ -779,9 +766,9 @@ def soft_ce_map(student_logits, teacher_probs):
 
 
 def confidence_from_entropy(probs, kappa=1.0):
-    # probs: (B,C,D,H,W) -> conf: (B,D,H,W) in (0,1]
-    H = entropy_from_probs(probs)            # (B,1,D,H,W)
-    conf = torch.exp(-kappa * H).squeeze(1) # (B,D,H,W)
+    # probs: (B,C,D,H,W) -> conf: (B,D,H,W)
+    H = entropy_from_probs(probs)                 # (B,1,D,H,W)
+    conf = torch.exp(-kappa * H).squeeze(1)       # (B,D,H,W)
     return conf
 
 
@@ -860,6 +847,41 @@ def mix_labels_pairs(y, mask):
     out[idx0] = torch.where(m[idx0], y[idx0], y[idx1])
     out[idx1] = torch.where(m[idx1], y[idx1], y[idx0])
     return out
+
+
+# ---------- FIX: feature layout + spatial alignment ----------
+def _to_channels_first_3d(feat, w_u):
+    """
+    feat: (B,C,D,H,W) or (B,D,H,W,C)
+    w_u:  (B,1,D,H,W) defines target spatial
+    returns: (B,C,D,H,W) resized to match w_u spatial
+    """
+    assert feat.dim() == 5, f"Expected 5D feature, got {feat.dim()}D"
+    D, H, W = w_u.shape[-3:]
+
+    # channels-first if last 3 dims equal target spatial
+    if feat.shape[-3:] == (D, H, W):
+        feat_cf = feat
+    # channels-last if dims 1:4 equal target spatial
+    elif feat.shape[1:4] == (D, H, W):
+        feat_cf = feat.permute(0, 4, 1, 2, 3).contiguous()
+    else:
+        # fallback heuristic: if last dim is small (like 2/4/8/16) and spatial looks like 96, assume channels-last
+        if feat.shape[-1] <= 64 and all(s >= 16 for s in feat.shape[1:4]):
+            feat_cf = feat.permute(0, 4, 1, 2, 3).contiguous()
+        else:
+            feat_cf = feat
+
+    if feat_cf.shape[-3:] != (D, H, W):
+        feat_cf = F.interpolate(feat_cf, size=(D, H, W), mode='trilinear', align_corners=False)
+    return feat_cf
+
+
+def weighted_feature_mse(Fs, Ft, w_u):
+    Fs = _to_channels_first_3d(Fs, w_u)
+    Ft = _to_channels_first_3d(Ft, w_u)
+    mse_map = (Fs - Ft).pow(2).mean(dim=1, keepdim=True)  # (B,1,D,H,W)
+    return (mse_map * w_u).mean()
 
 
 # ------------------------- Pretrain Improvements -------------------------
@@ -981,7 +1003,7 @@ def pre_train(args, snapshot_path):
                 return
 
 
-# ------------------------- NEW: voxel-wise focal map for CPS -------------------------
+# ------------------------- CPS: voxel-wise focal map -------------------------
 def focal_map_from_logits(logits, target, alpha_pos=0.75, gamma=2.0, eps=1e-8):
     """
     logits: (B,C,D,H,W)
@@ -992,10 +1014,9 @@ def focal_map_from_logits(logits, target, alpha_pos=0.75, gamma=2.0, eps=1e-8):
     p = torch.exp(logp)
 
     t = target.unsqueeze(1)                # (B,1,D,H,W)
-    p_t = torch.gather(p, 1, t).squeeze(1).clamp_min(eps)        # (B,D,H,W)
-    logp_t = torch.gather(logp, 1, t).squeeze(1)                 # (B,D,H,W)
+    p_t = torch.gather(p, 1, t).squeeze(1).clamp_min(eps)  # (B,D,H,W)
+    logp_t = torch.gather(logp, 1, t).squeeze(1)           # (B,D,H,W)
 
-    # binary alpha
     if logits.size(1) == 2:
         alpha = torch.where(
             target == 1,
@@ -1005,11 +1026,11 @@ def focal_map_from_logits(logits, target, alpha_pos=0.75, gamma=2.0, eps=1e-8):
     else:
         alpha = torch.ones_like(p_t)
 
-    loss = -alpha * (1.0 - p_t) ** gamma * logp_t               # (B,D,H,W)
+    loss = -alpha * (1.0 - p_t) ** gamma * logp_t
     return loss
 
 
-# ------------------------- Self-train (UPDATED) -------------------------
+# ------------------------- Self-train (Uncertainty-Aware Duet + UA PL refinement + Focal CPS) -------------------------
 def self_train(args, pre_snapshot_path, self_snapshot_path):
     encoder_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     decoder_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
@@ -1080,7 +1101,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             unimg = volume[args.labeled_bs:]
 
             # -----------------------------
-            # (1) Supervised losses (unchanged)
+            # (1) Supervised loss
             # -----------------------------
             lb_logits_enc, _ = encoder_model(img)
             lb_logits_dec, _ = decoder_model(img)
@@ -1090,13 +1111,13 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
             # -----------------------------
             # (2) Uncertainty-Aware Duet Loss (KEY CONTRIBUTION)
-            # Teacher: encoder_model (stable branch)
-            # Student: decoder_model with dropout perturbation
+            # Teacher: encoder_model (stable)
+            # Student: decoder_model with dropout
             # -----------------------------
             with torch.no_grad():
-                t_logits, t_feat = encoder_model(unimg)               # logits + features
-                t_probs = F.softmax(t_logits, dim=1)                  # (B,C,D,H,W)
-                H_t = entropy_from_probs(t_probs)                     # (B,1,D,H,W)
+                t_logits, t_feat = encoder_model(unimg)
+                t_probs = F.softmax(t_logits, dim=1)                 # (B,C,D,H,W)
+                H_t = entropy_from_probs(t_probs)                    # (B,1,D,H,W)
 
             s_logits, s_feat = decoder_model(unimg, feature_perturb='dropout', p=0.6)
             s_probs = F.softmax(s_logits, dim=1)
@@ -1105,60 +1126,51 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             beta_val = beta_schedule(iter_num, args.self_max_iteration, args.beta_max, args.beta_min, args.beta_decay)
             beta_t = torch.tensor(beta_val, device=unimg.device, dtype=torch.float32)
 
-            w_u = uncertainty_weight(H_s, H_t, beta_t)                # (B,1,D,H,W)
+            w_u = uncertainty_weight(H_s, H_t, beta_t)               # (B,1,D,H,W)
 
-            # feature consistency (weighted)
-            L_F = weighted_feature_mse(s_feat, t_feat.detach(), w_u)
-
-            # prediction consistency (weighted soft CE)
-            ce_map = soft_ce_map(s_logits, t_probs.detach())           # (B,D,H,W)
+            L_F = weighted_feature_mse(s_feat, t_feat.detach(), w_u)  # safe for channel-last/first features
+            ce_map = soft_ce_map(s_logits, t_probs.detach())          # (B,D,H,W)
             L_P = (ce_map.unsqueeze(1) * w_u).mean()
-
-            # entropy regularizer
             L_H = (H_s.mean() + H_t.mean())
 
             L_u_duet = args.u_duet_alpha_feat * L_F + L_P + args.u_duet_mu_ent * beta_t * L_H
 
-            # ramp-up on unlabeled regularization
             ru = rampup_factor(iter_num, args.u_rampup_iters)
             L_u_duet = ru * L_u_duet
 
-            # total for both optimizers (stable)
             loss_enc = lb_loss_enc + 0.5 * L_u_duet
             loss_dec = lb_loss_dec + 0.5 * L_u_duet
 
             # -----------------------------
-            # (3) Build inference model and Uncertainty-Aware Pseudo-Label Refinement (CutMix/CPS)
+            # (3) Inference model + Uncertainty-Aware Pseudo-Label Refinement (CutMix)
             # -----------------------------
             with torch.no_grad():
                 inference_model.decoder.load_state_dict(encoder_model.decoder.state_dict())
                 inference_model.encoder.load_state_dict(decoder_model.encoder.state_dict())
 
                 inf_logits, _ = inference_model(unimg)
-                inf_plab, inf_conf, inf_probs = get_plab_conf_probs(inf_logits)
+                inf_plab, _, inf_probs = get_plab_conf_probs(inf_logits)   # (B,D,H,W), (B,D,H,W), (B,C,D,H,W)
 
-                # Uncertainty-aware confidence map from entropy (no agreement masks)
+                # confidence map from entropy (soft, no agreement mask)
                 conf_map = confidence_from_entropy(inf_probs, kappa=args.pl_kappa)  # (B,D,H,W)
 
-                # Hard refinement of each branch pseudo-label:
-                # If conf is low, replace branch PL with stable PL from inference model.
                 enc_logits_ulb, _ = encoder_model(unimg)
                 dec_logits_ulb, _ = decoder_model(unimg)
 
                 enc_plab_ulb, _, _ = get_plab_conf_probs(enc_logits_ulb)
                 dec_plab_ulb, _, _ = get_plab_conf_probs(dec_logits_ulb)
 
+                # Hard refinement: low confidence -> use stable inference pseudo-label
                 low_conf = (conf_map < args.pl_refine_thres)
                 enc_plab_ref = torch.where(low_conf, inf_plab, enc_plab_ulb)
                 dec_plab_ref = torch.where(low_conf, inf_plab, dec_plab_ulb)
 
-                # Reliability mask for CPS: directly use confidence (soft)
-                rel_mask = conf_map  # (B,D,H,W) in (0,1]
+                # Reliability mask for CPS = confidence (soft)
+                rel_mask = conf_map
 
-                # context mask (pairwise CutMix)
                 img_mask, loss_mask = context_mask(unimg, args.mask_ratio)
 
-                # make loss_mask shape-safe (B,D,H,W)
+                # make loss_mask shape-safe to (B,D,H,W)
                 if torch.is_tensor(loss_mask):
                     loss_mask = loss_mask.to(device=unimg.device, dtype=unimg.dtype)
                 else:
@@ -1172,7 +1184,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                     loss_mask = loss_mask.unsqueeze(0).expand(unimg.size(0), *loss_mask.shape)
 
             # -----------------------------
-            # (4) CPS with FOCAL loss (instead of CE)
+            # (4) CPS with FOCAL loss
             # -----------------------------
             mixed_img = mix_images_pairs(unimg, img_mask)
             mixed_plab_enc = mix_labels_pairs(enc_plab_ref, img_mask)
@@ -1183,12 +1195,10 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             mixed_logits_enc, _ = encoder_model(mixed_img)
             mixed_logits_dec, _ = decoder_model(mixed_img)
 
-            # focal maps
             cps_map_enc = focal_map_from_logits(
                 mixed_logits_enc, mixed_plab_dec.long(),
                 alpha_pos=args.focal_alpha, gamma=args.focal_gamma
-            )  # (B,D,H,W)
-
+            )
             cps_map_dec = focal_map_from_logits(
                 mixed_logits_dec, mixed_plab_enc.long(),
                 alpha_pos=args.focal_alpha, gamma=args.focal_gamma
@@ -1198,9 +1208,6 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             cps_dec = (cps_map_dec * mixed_rel).sum() / (mixed_rel.sum() + 1e-6)
             cps_loss = ru * args.lambda_cps * (cps_enc + cps_dec)
 
-            # -----------------------------
-            # (5) Total loss + optimize
-            # -----------------------------
             total_loss = loss_enc + loss_dec + cps_loss
 
             enc_opt.zero_grad()
@@ -1211,7 +1218,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
             iter_num += 1
 
-            # EMA updates (unchanged)
+            # EMA updates (DuetMatch-style)
             update_ema_variables(encoder_model.encoder, decoder_model.encoder, 0.99)
             update_ema_variables(decoder_model.decoder, encoder_model.decoder, 0.99)
 
@@ -1223,7 +1230,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             )
 
             # -----------------------------
-            # (6) Validation / saving (unchanged)
+            # (5) Validation / saving
             # -----------------------------
             if iter_num % 200 == 0:
                 encoder_model.eval()
@@ -1299,3 +1306,4 @@ if __name__ == "__main__":
         pre_train(args, pre_snapshot_path)
 
     self_train(args, pre_snapshot_path, self_snapshot_path)
+
